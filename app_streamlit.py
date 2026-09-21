@@ -1,26 +1,34 @@
 import streamlit as st
 import pandas as pd
-import joblib
-from pathlib import Path
+import json
+import os
+import boto3
+from botocore.exceptions import ClientError
+
+ENDPOINT_NAME = os.environ.get("ENDPOINT_NAME", "UAS-endpoint")
+REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+@st.cache_resource
+def get_runtime_client():
+    return boto3.client("sagemaker-runtime", region_name=REGION)
+
+def invoke_endpoint(features: dict) -> dict:
+    runtime = get_runtime_client()
+    payload = {"instances": [features]}
+    
+    response = runtime.invoke_endpoint(
+        EndpointName=ENDPOINT_NAME,
+        ContentType="application/json",
+        Accept="application/json",
+        Body=json.dumps(payload),
+    )
+    return json.loads(response["Body"].read().decode("utf-8"))
 
 st.set_page_config(page_title="Credit Score Predictor", layout="wide")
 
-@st.cache_resource
-def load_model():
-    model_path = Path("best_model.joblib")
-    
-    if model_path.exists():
-        return joblib.load(model_path)
-    return None
-
-pipeline_model = load_model()
-
 st.sidebar.title("Informasi Aplikasi")
-st.sidebar.info("Aplikasi prediksi skor kredit")
-
-if pipeline_model is None:
-    st.sidebar.error("Model tidak ditemukan")
-    st.stop()
+st.sidebar.info("Aplikasi prediksi skor kredit berbasis Cloud (AWS SageMaker).")
+st.sidebar.success("Terhubung dengan Endpoint")
 
 st.title("Credit Score Prediction Dashboard")
 
@@ -52,7 +60,7 @@ with tab2:
         num_of_loan = st.number_input("Total Jumlah Pinjaman", min_value=0, max_value=20, value=1)
         delay_from_due_date = st.number_input("Rata-rata Telat Bayar (Hari)", min_value=0, max_value=365, value=5)
         num_of_delayed_payment = st.number_input("Banyaknya Pembayaran Telat", min_value=0, max_value=100, value=1)
-    
+        
     with c2:
         changed_credit_limit = st.number_input("Perubahan Limit Kredit (%)", min_value=-100.0, max_value=100.0, value=1.0)
         num_credit_inquiries = st.number_input("Banyaknya Inquiry Kredit", min_value=0, max_value=50, value=0)
@@ -85,7 +93,7 @@ with tab3:
         student_loan_freq = st.number_input("Student Loan", min_value=0, max_value=10, value=0)
 
 st.markdown("---")
-submit_btn = st.button("Prediksi Skor Kredit", type="primary", use_container_width=True)
+submit_btn = st.button("Prediksi Skor Kredit via SageMaker", type="primary", use_container_width=True)
 
 if submit_btn:
     input_dict = {
@@ -122,21 +130,26 @@ if submit_btn:
         'debt_consolidation_loan_freq': int(debt_consolidation_loan_freq)
     }
 
-    input_df = pd.DataFrame([input_dict])
-    
-    with st.spinner("Menganalisis..."):
+    with st.spinner("Mengirim data ke AWS SageMaker..."):
         try:
-            prediction = pipeline_model.predict(input_df)[0]
+            result = invoke_endpoint(input_dict)
             
-            score_map = {0: "Poor", 1: "Standard", 2: "Good"}
-            final_status = score_map.get(prediction, "Unknown")
+            final_status = result.get("credit_score_prediction", "Unknown")
+            probabilities = result.get("probabilities", [])
             
             if final_status == "Good":
-                st.success(f"Hasil Prediksi: {final_status} Credit Score")
+                st.success(f"Hasil Prediksi: **{final_status}** Credit Score")
             elif final_status == "Standard":
-                st.info(f"Hasil Prediksi: {final_status} Credit Score")
+                st.warning(f"Hasil Prediksi: **{final_status}** Credit Score")
+            elif final_status == "Poor":
+                st.error(f"Hasil Prediksi: **{final_status}** Credit Score")
             else:
-                st.error(f"Hasil Prediksi: {final_status} Credit Score")
+                st.error("Gagal membaca status prediksi dari model.")
                 
+            if probabilities:
+                st.caption(f"Probabilitas Model (Poor, Standard, Good): {probabilities}")
+                
+        except ClientError as e:
+            st.error(f"Eror Kredensial/Akses AWS: Pastikan EC2 memiliki IAM Role yang diizinkan untuk 'sagemaker:InvokeEndpoint'. Detail: {e}")
         except Exception as e:
-            st.error(f"Terjadi kesalahan dalam prediksi model: {e}")
+            st.error(f"Terjadi kesalahan saat memanggil SageMaker: {e}")
